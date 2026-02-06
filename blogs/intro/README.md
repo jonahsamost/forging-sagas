@@ -838,7 +838,7 @@ There's a lot more to cover, but those are topics for another day.
 
 Thanks for reading!
 
+Thank you to [de.bach](https://x.com/derangineer) for edits and suggestions!
 
 Written by [Jonah](https://x.com/jonahsamost)
 
-Thank you to [de.bach](https://x.com/derangineer) for edits and suggestions!
