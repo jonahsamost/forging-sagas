@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-cute-py"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "apache-tvm-ffi>=0.1.7",
+    "nvidia-cutlass-dsl>=4.3.4",
+    "pyyaml>=6.0",
+    "torch>=2.9.1",
+    "torch-c-dlpack-ext>=0.1.4",
+    "cute-viz",
+    "ipython",
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+cute-viz = { git = "https://github.com/NTT123/cute-viz.git" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.2",
+    "ruff>=0.14.10",
+]
+
+[tool.setuptools.packages.find]
+exclude = ["tests", "bench", "scripts"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+ignore = [
+    "E731",  # do not assign a lambda expression, use a def
+    "E741",  # Do not use variables named 'I', 'O', or 'l'
+    "F841",  # local variable is assigned to but never used
+]
