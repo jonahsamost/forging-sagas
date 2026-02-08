@@ -1,13 +1,14 @@
 # CuTe DSL Intro
 
-Hi! This intro assumes little to no experience programming with CuTe but it does assume experience with Cuda.
+Hi! This intro assumes little to no experience programming with CuTe but it does assume experience with CUDA.
 Let's dive in!
 
-CuTe DSL is a python based higher-level abstraction built on top of Cutlass, which is itself a C++ template
+CuTe DSL is a python based higher-level abstraction built on top of [CUTLASS](https://docs.nvidia.com/cutlass/latest/),
+which is itself a C++ template
 library that provides optimized operations for programming GPUs.
 
-The stated goal of Cutlass is to bridge the gap between productivity and performance for CUDA kernel development.
-The goal of CuTe DSL is to enable rapid prototyping and iteration on top of Cutlass.
+The stated goal of CUTLASS is to bridge the gap between productivity and performance for CUDA kernel development.
+The goal of CuTe DSL is to enable rapid prototyping and iteration on top of CUTLASS.
 
 
 The goals of this blogpost are twofold.
@@ -17,7 +18,7 @@ The second is to motivate why certain patterns exist in CuTe.
 
 ### `torch.sum` as our running example
 Let's start with a simple question, how do I even run CuTe code?
-A lot of this example inspiration comes from Nvidia's cutlass example [here](https://github.com/NVIDIA/cutlass/blob/main/examples/python/CuTeDSL/notebooks/elementwise_add.ipynb).
+A lot of this example inspiration comes from Nvidia's CUTLASS example [here](https://github.com/NVIDIA/cutlass/blob/main/examples/python/CuTeDSL/notebooks/elementwise_add.ipynb).
 
 
 So, let's create just a simple kernel, for now only focusing on the last dimension and assume a contiguous, 2d tensor.
@@ -81,23 +82,28 @@ Given an MxN tensor, we will launch M blocks, where each group of threads in a b
 will collectively load, reduce, then store.
 
 Importantly, CuTe exposes several decorators, with the main ones being `@cute.jit` and `@cute.kernel`.
+`@cute.jit` declares a host-side JIT-compiled function, whereas `@cute.kernel` declares the GPU kernel function.
 There are a few things we will be going over later like `from_dlpack`,
 `cute.compile`, and actually launching the kernel, but for now let's take that for granted.
 
 When you run `uv run python part1.py simple_launch`, we see `Success!`, but how fast is it? Let's compare versus torch.
 
-Let's run `uv run python part1.py compare_torch_initial`. 
 ```bash
-(forge-cute-py) root@33835e6c1ad1:~/forge-cute-py/docs/intro# python part1.py compare_torch_initial
+(forge-cute-py) root@33835e6c1ad1:~/forge-cute-py/docs/intro# uv run python part1.py compare_torch_initial
   cute dsl reduce sum: 135.723 ms
-  torch kernel add: 0.127 ms
+  torch kernel sum: 0.127 ms
 ```
 Ok, not great! We're clearly doing something wrong.
 
 ### Motivating compilation
 
 [Reading the docs](https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/dsl_jit_caching.html#custom-caching-with-cute-compile) you quickly see that `cute.compile` bypasses caching in CuTe DSL and _always_
-performs compilation. There are also a [couple parameters](https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/dsl_introduction.html?#jit) we can control as it relates to JIT compilation.
+performs compilation.
+There are also a [couple parameters](https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/dsl_introduction.html?#jit) we can control as it relates to JIT compilation.
+1) `preprocessor` when True (which is the default) will automatically translate Python control flow (i.e. loops, if statements)
+into IR operations, and when False, Python flow control must be manually handled or avoided;
+`no_cache` when True forces a fresh compilation each call (i.e. does not JIT cache), and when False (the default), enables
+caching.
 
 Ok, so on the [custom caching](https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/dsl_jit_caching.html#custom-caching-with-cute-compile)
 page in the docs, seemingly we only need a regular 
@@ -223,6 +229,22 @@ print("Success!")
 ```
 We see `Success!` printed. 
 
+Static type hints that enforce some behavior at runtime, point towards the JIT being able to add checks
+into its code based on its prototype. 
+From reading the docs, we see that CuTe can be run via two 
+[workflows](https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/framework_integration.html#integration-with-frameworks).
+
+In the `Typed workflow`, if you annotate your arguments as `cute.Tensor`, CuTe will enforce this contract during
+JIT argument generation and will reject objects that are not a `cute.Tensor`. In this path, you need to explicitly
+convert your tensor using `from_dlpack`.
+
+In the `Framework interoperable workflow`, if you omit those CuTe tensor annotations, you can pass a `torch.Tensor`
+directly and CuTe will perform the framework interop conversion for you.
+
+The recommended workflow, as we'll discuss in the next section, is to pass a `torch.Tensor` with TVM-FFI enabled
+to avoid explicit dlpack conversions.
+
+
 ### Meeting in the middle
 
 But backing up a little bit, do we really want to choose strictly between static or dynamic layouts?
@@ -268,7 +290,7 @@ In the CuTe context, TVM-FFI is an optional calling interface for JIT functions 
 If you're interested in going deeper into TVM-FFI, check [this](https://www.youtube.com/watch?v=xMzcs6AqLVo) video out.
 
 So, basically use TVM-FFI when you care about the overhead of calling a CuTe JIT-compiled function,
-or you want to call the compiled function with torch.Tensor inputs/outputs directly.
+or you want to call the compiled function with `torch.Tensor` inputs/outputs directly.
 TVM-FFI will handle the interoperability.
 
 For example, if you are benchmarking your kernels and you have an intuition that your kernel _should be_ faster but it's slower than torch's.
@@ -289,7 +311,7 @@ def our_kernel(x, output, stream=None):
     )
 
 fn = cute.compile(
-    our_kernel
+    our_kernel,
     input_cute,
     output_cute,
     cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
@@ -305,15 +327,17 @@ Ok, we know how to compile our code, let's actually starting writing on top of C
 
 Not so fast!
 
-Looking back at the initial kernel we wrote, it looks more like Cuda than it does like CuTe.
+Looking back at the initial kernel we wrote, it looks more like CUDA than it does like CuTe.
 We haven't actually used any core abstractions that CuTe supports, namely [Layouts](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/01_layout.html#).
-A Layout, as described in those docs, "present a common interface to multidimensional array access that abstracts away the details of how the array’s elements are organized in memory".
+A Layout, as described in those docs, "presents a common interface to multidimensional array access that abstracts away the details of how the array’s elements are organized in memory".
 It's a clear statement, but the statement _itself_ feels a bit abstract.
 
 As you can see from those docs, a [layout](https://github.com/NVIDIA/cutlass/blob/main/python/CuTeDSL/cutlass/cute/core.py#L2808)
-is defined mainly by a shape and an optional stride.
+is defined mainly by a shape and stride.
 Importantly, a layout is not itself data, it is the shape
 and indexing rule that allows one to know where the data is stored and how to traverse it.
+And you can apply a rule to data coordinates (to describe how some tensor is organized in memory) and also
+to execution coordinates (to describe how threads will collectively traverse some tile of data).
 
 What is also interesting about layouts is that
 they are both [hierarchical](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/01_layout.html#hierarchical-access-functions) and compositional, which is to say, you can define a layout of layouts.
@@ -321,12 +345,17 @@ they are both [hierarchical](https://docs.nvidia.com/cutlass/latest/media/docs/c
 Ok, so layouts _feel_ almost like tensor metadata.
 Except, its only the view/indexing portion (i.e. the shape and stride) without dtypes, pointers, etc.
 
-Ok, so given this, in order to layout-ify our reduce_sum kernel, we know we'd want _some_ sort of hierarchy.
-If we map our current kernel to this layout frame of mind,
-we know we want each thread to access a single value for each iteration in the main loop.
-So, we can think of this as a layout of shape (1,). We know these N warps will be their own layout,
-so we can think of them as a layout of shape (32 * N,).
-Finally, we know that in a matrix of shape (M, N), we will want a layout of (M, warp_layout).
+Ok, so given this, in order to layout-ify our reduce_sum kernel,
+we know we'd want _some_ sort of explicit indexing scheme instead of the thread arithmetic
+like we did in our initial kernel.
+
+So, if we map our current kernel to this layout frame of mind,
+We see that the reduction axis (`N`) already has a natural two-level structure,
+the block walks over `N` in chunks, and within each chunk the threads cooperatively cover the elements.
+
+So, we can treat `N` as a hierarchical layout with an outer coordinate that determines which chunk were in
+(i.e `ceil_div(N, T)`) and an inner coorindate that determines which element within the chunk (here `T`).
+And then we'll just apply this over every row `M`.
 
 So, conceptually, something similar to:
 ```bash
@@ -339,20 +368,21 @@ Layout<
 >
 ```
 
-But is this really the right way to be thinking about layouts? 
+But this only describes how we partition the data coordinate space.
+We also need to specify the thread/value mapping.
 
-The docs are a bit heavy and too hard to follow, so let's ground ourselves and visualize!
+We know that a layout is a mapping from some logical coordinate space to an index/offset.
+When that coordinate space is (m, n), it describes a data layout in memory;
+when it’s (thread, value) it describes which element(s) inside a tile each thread accesses.
 
-We know that a layout is simply a mapping from thread indices to memory offsets that each thread will load/store from.
-Or more generally, a mapping from logical indices to memory offsets.
-But how CuTe wants us to use them seems overly confused.
+But it is somewhat unclear in the docs how we can write our program such that these two types of layouts can cooperate.
 
 I think its a great intuition pump to actually _see_ some layout visualizations.
 And see how the printed layout_tv maps to the visualizations you see. Let's start with an easy one:
 
 ```python
 @cute.jit
-def print_layout_trash(x):
+def print_layout(x):
     thr_layout = cute.make_layout((32,), stride=(1,))
     val_layout = cute.make_layout((1,), stride=(1,))
     tiler_mn, layout_tv = cute.make_layout_tv(thr_layout, val_layout)
@@ -366,7 +396,7 @@ def compile_print():
     x = torch.randn(64, 32)
     gx = from_dlpack(x)
     fn = cute.compile(
-        print_layout_trash,
+        print_layout,
         gx
     )
     fn(gx)
@@ -376,12 +406,27 @@ gX: tensor<ptr<f32, generic> o ((1,32),(64,1)):((0,1),(32,0))>
 ```
 ![TV Layout Visualization](tv_layout_32_1.svg)
 
-The layout visualizaton makes sense, but we need to remind ourselves what `zipped_divide` gives us.
+
+We see there are related but distinct "layout stories" happening in CuTe.
+
+In one story, when we use the function `cute.make_layout_tv` were making a combined mapping from a (thread, value) to an 
+element coordinate/offset within a tile. Our `thr_layout` defines coordinates as threads
+(i.e. we're creating a logical thread arrangement) and our
+`val_layout` defines coordinates that are per thread (i.e. which elements some thread will access).
+Simply, `layout_tv` is a mapping from (thread, value) to a coordinate in a tile, that tells you which 
+element(s) inside a single tile each thread will access.
+
+The layout visualization makes sense, but we need to remind ourselves what `zipped_divide` gives us.
 Note that for the purpose of this post, I'm statically compiling such that it's easier to understand how things
 fit together, but if/when you compile dynamically, because the compiler doesn't know the shape
 of those dynamic parameters, you may see something like `(1,32),(?,?)`.
 
-But `(1,32),(64,1)` make sense. `zipped_divide` will return a shape of (tile_size, number_of_tiles), or 
+The second story, a data tiling story, functions like `zipped_divide` factor a tensor's logical coordinate space
+into ((coord_in_tile), (tile_coord)), so you can talk separately about
+“where am I inside a tile?” vs “which tile am I in?”.
+This is purely a data-space view, no threads are involved.
+
+The shapes `(1,32),(64,1)` make sense. `zipped_divide` will return a shape of (tile_size, number_of_tiles), or 
 how you might usually see it defined, ((TileM, TileN), (RestM, RestN)). And this generalizes to n-dimensional
 shapes as well, i.e. ((inner), (outer)), where the left hand size is fine-grained
 (the position inside one tile) and the right is coarse-grained (i.e. which tile you are in).
@@ -399,8 +444,7 @@ gX: tensor<ptr<f32, generic> o ((4,8),(16,4)):((32,1),(128,8))>
 ![TV Layout Visualization](tv_layout_4_8.svg)
 
 Ok, so each tile is of shape (4, 8), and because our tensor is (64, 32),
-we get 64 / 4 == 16 and 32 / 4 == 8. Ok, so the shapes make sense, how about the strides? 
-
+we get 64 / 4 == 16 and 32 / 8 == 4. Ok, so the shapes make sense, how about the strides? 
 
 So, again, we think inside to out. For (32, 1), in order to move 1 _row_ _within_ a tile, you will
 skip 32, and to move to the next _column_ also _within_ a tile, you would skip 1. Then in terms of our grid,
@@ -421,11 +465,34 @@ Let's work through this one. The thread layout is effectively 2d where the last 
 and the stride's last dimension is 1. So, there will be 8 columns with stride 1.
 This checks out with the picture. 
 
-Working inwards, our shape is (2, 4) and strided (32, 8). Which you can think of as 2 "row groups",
-where each row group contains 4 _rows_.
-Moving within a row group from one row to the next advances the thread id by 8, so each successive row starts 8 threads later.
-Switching from the first to second row group advances the thread id by 32.
-In the visualization, those two groups are interleaved.
+Working inwards, the “row-like” part of the layout has shape `(2, 4)` with strides `(32, 8)`.
+It’s helpful to name those coordinates as `(g, r)`, where g is in {0,1} and selects the group,
+and r is in {0,1,2,3} and selects the row within the group.
+
+Because this shape is hierarchical, CuTe’s logical row order for `(2,4)` is not
+“all of group 0, then all of group 1.” Instead, it flattens the nested coordinate so that
+`g` varies faster than `r`, meaning the rows are visited as:
+
+`(g,r) = (0,0), (1,0), (0,1), (1,1), (0,2), (1,2), (0,3), (1,3)`
+
+With strides `(32, 8)`, the base thread id for each such row is:
+
+`tid_row = 32*g + 8*r`
+
+which produces the sequence:
+
+`0, 32, 8, 40, 16, 48, 24, 56`
+
+So the two groups naturally interleave: every time you advance to the next “row” in the flattened order,
+you alternate between group 0 and group 1, and the thread ids reflect that alternation.
+
+Finally, the last dimension has shape `8` with stride `1`, so within a given row each thread walks across the 8 columns contiguously.
+In other words, within the tile the per-element mapping is:
+
+`tid = 32*g + 8*r + c`  (with `c` as the column index)
+
+That is exactly what you see in the visualization (i.e. interleaved row groups, with contiguous columns inside each row).
+
 
 ### Layout recap
 
@@ -433,8 +500,8 @@ Ok, so layouts provide precise control over how threads are mapped to data acces
 highly expressive. And though they can be a bit hard to reason over, they are integral to CuTe, so it 
 pays off to focus on them for a bit.
 
-But it still doesn't feel clear how all of this fits together. We have this one world of thread-mapping views, using 
-thr_layout or layout_tv, which describes how threads are organized and which element inside a tile each thread will access.
+At this point, it helps to separate what we’ve built into two worlds. We have this one world of thread-mapping views, using 
+`thr_layout` or `layout_tv`, which describes how threads are organized and which element inside a tile each thread will access.
 Those were our visualizations.
 
 But we also have this other world, using functions like zipped_divide, that actually 
@@ -457,7 +524,7 @@ So, let's think how we'd do this.
 First, we need a layout that describes which elements of a tile each thread will access.
 Second, we need to decompose the input tensor into subtiles so that each thread block operates on some chunk of data.
 Then, in our kernel, each block will select its corresponding tile.
-Finally, each thread will load its asigned elements from that tile according the thread layout.
+Finally, each thread will load its assigned elements from that tile according the thread layout.
 
 The following code can be found in reduce_2d.py.
 Note that we're not doing bounds checking or any optimizations.
@@ -804,7 +871,7 @@ class ReduceSum:
         )
     
     @cute.kernel
-    def kernel(self, gInput: cute.Tensor, gOutput: cute.Tensor, tiler_mn: cute.Shape, tiled_copy: cute.TiledCopy):
+    def kernel(self, gInput: cute.Tensor, gOutput: cute.Tensor, tiler_nd: cute.Shape, tiled_copy: cute.TiledCopy):
         tidx, _, _ = cute.arch.thread_idx()
         bidx, _, _ = cute.arch.block_idx()
         warp_idx = tidx // self.warp_size
@@ -814,7 +881,7 @@ class ReduceSum:
         before_idx = out_idx // self.after_prod
         after_idx = out_idx % self.after_prod
 
-        gX = cute.local_tile(gInput, tiler_mn, (before_idx, None, after_idx))
+        gX = cute.local_tile(gInput, tiler_nd, (before_idx, None, after_idx))
         tidxSlice = tiled_copy.get_slice(tidx)  
         tidxIndices = tidxSlice.partition_S(gX)
         tidxRegs = cute.make_rmem_tensor_like(tidxIndices)
